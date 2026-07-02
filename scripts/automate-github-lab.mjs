@@ -116,7 +116,10 @@ function ensureCommit() {
 }
 
 function repoExists() {
-  return gh(aToken, ['repo', 'view', fullRepo], {capture: true, check: false}).status === 0;
+  return gh(aToken, ['repo', 'view', fullRepo, '--json', 'name'], {
+    capture: true,
+    check: false
+  }).status === 0;
 }
 
 function ensureRepo() {
@@ -395,6 +398,50 @@ async function forkAndPr() {
   });
 }
 
+async function restDelete() {
+  setup();
+  const prefix = `delete-${stamp}-`;
+  const common = {
+    key_variant: 'literal',
+    path_variant: 'relative',
+    toolkit_path_parse_mode: 'raw',
+    enable_cross_os_archive: 'false'
+  };
+
+  await dispatchCanonicalization('delete seed a', {
+    ...common,
+    operation: 'roundtrip',
+    driver: 'action',
+    cache_key: `${prefix}a`,
+    payload_label: 'delete-seed-a',
+    runner_debug: 'true'
+  });
+  await dispatchCanonicalization('delete seed b', {
+    ...common,
+    operation: 'roundtrip',
+    driver: 'action',
+    cache_key: `${prefix}b`,
+    payload_label: 'delete-seed-b',
+    runner_debug: 'true'
+  });
+  await dispatchCanonicalization('delete prefix list before', {
+    ...common,
+    operation: 'list',
+    driver: 'api',
+    cache_key: prefix,
+    payload_label: 'delete-prefix-list-before',
+    runner_debug: 'false'
+  });
+  await dispatchCanonicalization('delete prefix attempt', {
+    ...common,
+    operation: 'delete-key',
+    driver: 'api',
+    cache_key: prefix,
+    payload_label: 'delete-prefix-attempt',
+    runner_debug: 'false'
+  });
+}
+
 async function cleanup() {
   gh(aToken, ['repo', 'delete', fullRepo, '--yes']);
 }
@@ -412,13 +459,17 @@ switch (mode) {
   case 'pr':
     await forkAndPr();
     break;
+  case 'rest-delete':
+    await restDelete();
+    break;
   case 'all':
     await drift();
+    await restDelete();
     await forkAndPr();
     break;
   case 'cleanup':
     await cleanup();
     break;
   default:
-    fail(`Unknown mode: ${mode}. Use setup, smoke, drift, pr, all, or cleanup.`);
+    fail(`Unknown mode: ${mode}. Use setup, smoke, drift, rest-delete, pr, all, or cleanup.`);
 }

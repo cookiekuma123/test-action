@@ -59,6 +59,7 @@ export LAB_REPO_NAME='cache-canon-lab'
 npm run github:lab -- setup
 npm run github:lab -- smoke
 npm run github:lab -- drift
+npm run github:lab -- rest-delete
 npm run github:lab -- pr
 ```
 
@@ -67,8 +68,9 @@ Modes:
 - `setup`: commit local lab files, create A's repo, and push `main`.
 - `smoke`: setup plus one roundtrip cache run and one REST list run.
 - `drift`: setup plus path, case, and Unicode drift probes.
+- `rest-delete`: setup plus two disposable cache seeds, a REST prefix list, and a REST delete-by-key prefix attempt.
 - `pr`: setup plus B fork, branch, marker commit, and PR against A.
-- `all`: run `drift` then `pr`.
+- `all`: run `drift`, `rest-delete`, then `pr`.
 - `cleanup`: delete A's lab repo.
 
 The script reads tokens from environment variables and does not write them to the repository.
