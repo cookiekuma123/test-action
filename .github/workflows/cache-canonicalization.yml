@@ -189,11 +189,11 @@ jobs:
 
       - name: Run direct @actions/cache toolkit
         if: ${{ (inputs.driver == 'toolkit' || inputs.driver == 'both') && inputs.operation != 'list' && inputs.operation != 'delete-key' }}
+        uses: ./.github/actions/cache-toolkit
         env:
           LAB_CACHE_KEY: ${{ steps.lab.outputs.cache_key }}
           LAB_PATHS_JSON: ${{ steps.lab.outputs.paths_json }}
           LAB_RESTORE_KEYS_JSON: ${{ steps.lab.outputs.restore_keys_json }}
-        run: npm run toolkit
 
       - name: Delete via REST API by key
         if: ${{ inputs.operation == 'delete-key' }}
