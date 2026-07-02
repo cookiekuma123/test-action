@@ -385,7 +385,7 @@ async function forkAndPr() {
 
   const runInfo = await waitForNewRun(workflow, before, ['--event', 'pull_request']);
   console.log(`PR workflow: ${runInfo.url}`);
-  if (runInfo.status === 'action_required') {
+  if (runInfo.status === 'action_required' || runInfo.conclusion === 'action_required') {
     ghApi(aToken, 'POST', `/repos/${fullRepo}/actions/runs/${runInfo.databaseId}/approve`, null, {
       check: false
     });
