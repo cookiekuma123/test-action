@@ -1,0 +1,88 @@
+name: Expression Unicode Ref Confusion Lab
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  ref-confusion:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_REF: refs/heads/expression-unicode-Σ
+      EXPECTED_REF_NAME: expression-unicode-Σ
+    steps:
+      - name: Record raw context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p observations
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function describe(name, value) {
+            return {
+              name,
+              value,
+              utf8Hex: Buffer.from(value, 'utf8').toString('hex'),
+              codePoints: [...value].map(char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
+            };
+          }
+
+          const data = {
+            githubRef: describe('github.ref', process.env.GITHUB_REF || ''),
+            githubRefName: describe('github.ref_name', process.env.GITHUB_REF_NAME || ''),
+            expectedRef: describe('EXPECTED_REF', process.env.EXPECTED_REF || ''),
+            expectedRefName: describe('EXPECTED_REF_NAME', process.env.EXPECTED_REF_NAME || ''),
+            nodeStrictRefEqual: process.env.GITHUB_REF === process.env.EXPECTED_REF,
+            nodeStrictRefNameEqual: process.env.GITHUB_REF_NAME === process.env.EXPECTED_REF_NAME
+          };
+
+          fs.writeFileSync('observations/raw-context.json', `${JSON.stringify(data, null, 2)}\n`);
+          console.log(JSON.stringify(data, null, 2));
+          NODE
+
+      - name: Runner expression equality matched expected ref
+        if: ${{ github.ref == 'refs/heads/expression-unicode-Σ' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "runner-expression=github.ref == 'refs/heads/expression-unicode-Σ'"
+            echo "result=matched"
+            echo "github.ref=${GITHUB_REF}"
+            echo "expected=${EXPECTED_REF}"
+          } | tee observations/expression-ref-equality-matched.txt
+
+      - name: Runner expression equality matched expected ref_name
+        if: ${{ github.ref_name == 'expression-unicode-Σ' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "runner-expression=github.ref_name == 'expression-unicode-Σ'"
+            echo "result=matched"
+            echo "github.ref_name=${GITHUB_REF_NAME}"
+            echo "expected=${EXPECTED_REF_NAME}"
+          } | tee observations/expression-ref-name-equality-matched.txt
+
+      - name: Runner expression startsWith matched expected ref
+        if: ${{ startsWith(github.ref, 'refs/heads/expression-unicode-Σ') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "runner-expression=startsWith(github.ref, 'refs/heads/expression-unicode-Σ')"
+            echo "result=matched"
+            echo "github.ref=${GITHUB_REF}"
+            echo "expected=${EXPECTED_REF}"
+          } | tee observations/expression-ref-startswith-matched.txt
+
+      - name: Upload observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: expression-unicode-ref-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: observations/
+          if-no-files-found: error
