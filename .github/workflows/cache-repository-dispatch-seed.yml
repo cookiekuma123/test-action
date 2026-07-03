@@ -139,6 +139,106 @@ jobs:
             echo "release-tag=\${LAB_RELEASE_TAG}"
             echo "release-asset=\${LAB_RELEASE_ASSET_NAME}"
           fi
+          if [[ "\${LAB_GHCR_WRITE_PROOF:-false}" == "true" ]]; then
+            : "\${GH_TOKEN:?GH_TOKEN is required for GHCR write proof}"
+            : "\${LAB_GHCR_IMAGE:?LAB_GHCR_IMAGE is required for GHCR write proof}"
+            : "\${LAB_GHCR_TAG:?LAB_GHCR_TAG is required for GHCR write proof}"
+            mkdir -p package-proof
+            cat > package-proof/proof.txt <<PROOF
+          package-write-proof=true
+          tool-label=issue-comment-repository-dispatch-tool
+          tool-cache-key=${CACHE_KEY}
+          tool-source=low-trust-issue-comment-via-repository-dispatch
+          comment-actor=${COMMENT_ACTOR}
+          comment-id=${COMMENT_ID}
+          source-issue-comment-run-id=${SOURCE_RUN_ID}
+          trusted-run-id=\${GITHUB_RUN_ID}
+          image=\${LAB_GHCR_IMAGE}
+          tag=\${LAB_GHCR_TAG}
+          github-repository=\${GITHUB_REPOSITORY}
+          PROOF
+            cat > package-proof/Dockerfile <<DOCKER
+          FROM scratch
+          LABEL org.opencontainers.image.source="https://github.com/\${GITHUB_REPOSITORY}"
+          LABEL lab.package_write_proof="true"
+          LABEL lab.tool_label="issue-comment-repository-dispatch-tool"
+          LABEL lab.tool_source="low-trust-issue-comment-via-repository-dispatch"
+          LABEL lab.comment_actor="${COMMENT_ACTOR}"
+          LABEL lab.comment_id="${COMMENT_ID}"
+          LABEL lab.source_issue_comment_run_id="${SOURCE_RUN_ID}"
+          LABEL lab.trusted_run_id="\${GITHUB_RUN_ID}"
+          LABEL lab.cache_key="${CACHE_KEY}"
+          COPY proof.txt /proof.txt
+          DOCKER
+            echo "\${GH_TOKEN}" | docker login ghcr.io -u "\${GITHUB_ACTOR}" --password-stdin >/dev/null
+            docker build -t "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}" package-proof
+            docker push "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}"
+            docker image rm "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}" >/dev/null 2>&1 || true
+            docker pull "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}"
+            image_digest="\$(docker image inspect --format='{{index .RepoDigests 0}}' "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}")"
+            image_labels="\$(docker image inspect --format='{{json .Config.Labels}}' "\${LAB_GHCR_IMAGE}:\${LAB_GHCR_TAG}")"
+            echo "package-write-proof=true"
+            echo "package-image=\${LAB_GHCR_IMAGE}"
+            echo "package-tag=\${LAB_GHCR_TAG}"
+            echo "package-image-digest=\${image_digest}"
+            echo "package-image-labels=\${image_labels}"
+          fi
+          if [[ "\${LAB_OIDC_PROOF:-false}" == "true" ]]; then
+            : "\${ACTIONS_ID_TOKEN_REQUEST_URL:?ACTIONS_ID_TOKEN_REQUEST_URL is required for OIDC proof}"
+            : "\${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?ACTIONS_ID_TOKEN_REQUEST_TOKEN is required for OIDC proof}"
+            audience="\${LAB_OIDC_AUDIENCE:-cache-oidc-proof}"
+            encoded_audience="\$(AUDIENCE="\${audience}" node -e 'process.stdout.write(encodeURIComponent(process.env.AUDIENCE))')"
+            oidc_response="\$(curl -fsSL -H "Authorization: bearer \${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "\${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=\${encoded_audience}")"
+            mkdir -p oidc-proof
+            OIDC_RESPONSE="\${oidc_response}" OIDC_AUDIENCE="\${audience}" node <<'OIDCNODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+
+          const response = JSON.parse(process.env.OIDC_RESPONSE || '{}');
+          const token = response.value;
+          if (!token) {
+            throw new Error('OIDC response did not include a token value');
+          }
+
+          function decodeBase64Url(part) {
+            const normalized = part.replace(/-/g, '+').replace(/_/g, '/');
+            const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+            return Buffer.from(padded, 'base64').toString('utf8');
+          }
+
+          const [headerPart, payloadPart] = token.split('.');
+          const header = JSON.parse(decodeBase64Url(headerPart));
+          const payload = JSON.parse(decodeBase64Url(payloadPart));
+          const safe = {
+            oidcTokenRetrieved: true,
+            tokenSha256: crypto.createHash('sha256').update(token).digest('hex'),
+            audienceRequested: process.env.OIDC_AUDIENCE,
+            headerAlg: header.alg,
+            headerTyp: header.typ,
+            aud: payload.aud,
+            sub: payload.sub,
+            repository: payload.repository,
+            repository_id: payload.repository_id,
+            repository_owner: payload.repository_owner,
+            repository_visibility: payload.repository_visibility,
+            ref: payload.ref,
+            sha: payload.sha,
+            workflow: payload.workflow,
+            workflow_ref: payload.workflow_ref,
+            job_workflow_ref: payload.job_workflow_ref,
+            run_id: payload.run_id,
+            run_number: payload.run_number,
+            actor: payload.actor,
+            event_name: payload.event_name,
+            issuer: payload.iss
+          };
+
+          fs.writeFileSync('oidc-proof/claims.json', JSON.stringify(safe, null, 2) + '\n');
+          for (const [key, value] of Object.entries(safe)) {
+            console.log(key + '=' + (Array.isArray(value) ? value.join(',') : value));
+          }
+          OIDCNODE
+          fi
           EOF
           chmod +x deploy-tools/deploy.sh
           printf 'prepare-ran=true\ncache-key=%s\n' "$CACHE_KEY" | tee observations/prepared.txt
