@@ -1,0 +1,174 @@
+name: Artifact Unicode Confusion Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_name:
+        description: ASCII base artifact name.
+        required: true
+        default: artifact-unicode
+      seed_variant:
+        description: Raw name uploaded by the seed step.
+        type: choice
+        required: true
+        default: trailing-zwsp
+        options:
+          - literal
+          - trailing-zwsp
+          - embedded-zwsp
+          - nfc-e-acute
+          - nfd-e-acute
+          - upper
+          - lower
+      probe_variant:
+        description: Raw name used by REST and download-artifact probes.
+        type: choice
+        required: true
+        default: literal
+        options:
+          - literal
+          - trailing-zwsp
+          - embedded-zwsp
+          - nfc-e-acute
+          - nfd-e-acute
+          - upper
+          - lower
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  artifact-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve artifact names
+        id: names
+        shell: bash
+        env:
+          BASE_NAME: ${{ inputs.base_name }}
+          SEED_VARIANT: ${{ inputs.seed_variant }}
+          PROBE_VARIANT: ${{ inputs.probe_variant }}
+        run: |
+          set -euo pipefail
+          mkdir -p observations seed-payload downloaded-by-name
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function variant(base, name) {
+            switch (name) {
+              case 'literal':
+                return base;
+              case 'trailing-zwsp':
+                return `${base}\u200b`;
+              case 'embedded-zwsp':
+                return `${base.slice(0, Math.max(1, Math.floor(base.length / 2)))}\u200b${base.slice(Math.max(1, Math.floor(base.length / 2)))}`;
+              case 'nfc-e-acute':
+                return `${base}-\u00e9`;
+              case 'nfd-e-acute':
+                return `${base}-e\u0301`;
+              case 'upper':
+                return base.toUpperCase();
+              case 'lower':
+                return base.toLowerCase();
+              default:
+                throw new Error(`unknown variant: ${name}`);
+            }
+          }
+
+          function describe(value) {
+            return {
+              value,
+              length: value.length,
+              byteLength: Buffer.byteLength(value, 'utf8'),
+              utf8Hex: Buffer.from(value, 'utf8').toString('hex'),
+              codePoints: [...value].map(char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
+            };
+          }
+
+          const base = process.env.BASE_NAME || '';
+          const seedName = variant(base, process.env.SEED_VARIANT);
+          const probeName = variant(base, process.env.PROBE_VARIANT);
+          const metadata = {
+            base: describe(base),
+            seedVariant: process.env.SEED_VARIANT,
+            seedName: describe(seedName),
+            probeVariant: process.env.PROBE_VARIANT,
+            probeName: describe(probeName),
+            rawEqual: seedName === probeName,
+            nfcEqual: seedName.normalize('NFC') === probeName.normalize('NFC'),
+            localeAccentEqual: seedName.localeCompare(probeName, undefined, {sensitivity: 'accent'}) === 0
+          };
+
+          fs.writeFileSync('observations/name-metadata.json', `${JSON.stringify(metadata, null, 2)}\n`);
+          fs.writeFileSync('seed-payload/provenance.txt', `seed-name=${seedName}\nprobe-name=${probeName}\nrun-id=${process.env.GITHUB_RUN_ID}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `seed_name<<EOF\n${seedName}\nEOF\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `probe_name<<EOF\n${probeName}\nEOF\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `probe_name_url=${encodeURIComponent(probeName)}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `seed_name_url=${encodeURIComponent(seedName)}\n`);
+          NODE
+
+      - name: Upload seed artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.names.outputs.seed_name }}
+          path: seed-payload/
+          if-no-files-found: error
+
+      - name: REST artifact name probes
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED_QUERY: ${{ steps.names.outputs.seed_name_url }}
+          PROBE_QUERY: ${{ steps.names.outputs.probe_name_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p observations
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=${SEED_QUERY}" \
+            > observations/rest-seed-name-query.json
+          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?name=${PROBE_QUERY}" \
+            > observations/rest-probe-name-query.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const seed = JSON.parse(fs.readFileSync('observations/rest-seed-name-query.json', 'utf8'));
+          const probe = JSON.parse(fs.readFileSync('observations/rest-probe-name-query.json', 'utf8'));
+          const summary = {
+            seedTotal: seed.total_count,
+            seedNames: seed.artifacts.map(a => ({id: a.id, name: a.name, digest: a.digest})),
+            probeTotal: probe.total_count,
+            probeNames: probe.artifacts.map(a => ({id: a.id, name: a.name, digest: a.digest}))
+          };
+          fs.writeFileSync('observations/rest-query-summary.json', `${JSON.stringify(summary, null, 2)}\n`);
+          console.log(JSON.stringify(summary, null, 2));
+          NODE
+
+      - name: Download by probe name
+        id: download_by_name
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ steps.names.outputs.probe_name }}
+          path: downloaded-by-name
+
+      - name: Inspect download result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "download-step-outcome=${{ steps.download_by_name.outcome }}"
+            echo "download-step-conclusion=${{ steps.download_by_name.conclusion }}"
+            echo "downloaded files:"
+            find downloaded-by-name -maxdepth 3 -type f -print -exec sed -n '1,20p' {} \; || true
+          } | tee observations/download-by-name-result.txt
+
+      - name: Upload observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-unicode-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: observations/
+          if-no-files-found: error
