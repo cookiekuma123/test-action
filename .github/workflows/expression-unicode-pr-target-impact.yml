@@ -1,0 +1,76 @@
+name: Expression Unicode PR Target Impact Lab
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  pr-target-confusion:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_HEAD_REF: expression-unicode-Σ
+    steps:
+      - name: Record pull request context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p observations
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function describe(name, value) {
+            return {
+              name,
+              value,
+              utf8Hex: Buffer.from(value, 'utf8').toString('hex'),
+              codePoints: [...value].map(char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
+            };
+          }
+
+          const data = {
+            repository: process.env.GITHUB_REPOSITORY,
+            eventName: process.env.GITHUB_EVENT_NAME,
+            headRef: describe('github.head_ref', process.env.GITHUB_HEAD_REF || ''),
+            baseRef: describe('github.base_ref', process.env.GITHUB_BASE_REF || ''),
+            expectedHeadRef: describe('EXPECTED_HEAD_REF', process.env.EXPECTED_HEAD_REF || ''),
+            nodeStrictHeadRefEqual: process.env.GITHUB_HEAD_REF === process.env.EXPECTED_HEAD_REF
+          };
+
+          fs.writeFileSync('observations/pr-target-context.json', `${JSON.stringify(data, null, 2)}\n`);
+          console.log(JSON.stringify(data, null, 2));
+          NODE
+
+      - name: Privileged head_ref gate matched
+        if: ${{ github.head_ref == 'expression-unicode-Σ' }}
+        shell: bash
+        env:
+          CANARY_SECRET: ${{ secrets.UNICODE_CONFUSION_CANARY }}
+        run: |
+          set -euo pipefail
+          {
+            echo "runner-expression=github.head_ref == 'expression-unicode-Σ'"
+            echo "result=matched"
+            echo "github.head_ref=${GITHUB_HEAD_REF}"
+            echo "expected=${EXPECTED_HEAD_REF}"
+            if [ -n "${CANARY_SECRET}" ]; then
+              echo "base-repo-secret-present=true"
+              printf '%s' "${CANARY_SECRET}" | sha256sum | awk '{print "base-repo-secret-sha256="$1}'
+            else
+              echo "base-repo-secret-present=false"
+            fi
+          } | tee observations/pr-target-privileged-gate-matched.txt
+
+      - name: Upload observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: expression-unicode-pr-target-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: observations/
+          if-no-files-found: error
