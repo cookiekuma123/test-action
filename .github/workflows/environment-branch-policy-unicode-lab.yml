@@ -1,0 +1,66 @@
+name: Environment Branch Policy Unicode Lab
+
+on:
+  push:
+    branches:
+      - 'env-policy-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  env-policy-probe:
+    runs-on: ubuntu-latest
+    environment: unicode-env-policy-prod
+    steps:
+      - name: Record environment access
+        shell: bash
+        env:
+          ENV_POLICY_CANARY: ${{ secrets.ENV_POLICY_CANARY }}
+        run: |
+          set -euo pipefail
+          mkdir -p observations
+          {
+            echo "environment=unicode-env-policy-prod"
+            echo "github_ref=${GITHUB_REF}"
+            echo "github_ref_name=${GITHUB_REF_NAME}"
+            echo "github_sha=${GITHUB_SHA}"
+            if [ -n "${ENV_POLICY_CANARY:-}" ]; then
+              echo "environment-secret-present=true"
+              printf '%s' "${ENV_POLICY_CANARY}" | sha256sum | awk '{print "environment-secret-sha256="$1}'
+            else
+              echo "environment-secret-present=false"
+            fi
+          } | tee observations/environment-access.txt
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function describe(value) {
+            return {
+              value,
+              length: value.length,
+              byteLength: Buffer.byteLength(value, 'utf8'),
+              utf8Hex: Buffer.from(value, 'utf8').toString('hex'),
+              codePoints: [...value].map(char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`)
+            };
+          }
+
+          const refName = process.env.GITHUB_REF_NAME || '';
+          const expected = 'env-policy-prod';
+          fs.writeFileSync('observations/ref-metadata.json', `${JSON.stringify({
+            expected: describe(expected),
+            refName: describe(refName),
+            rawEqual: refName === expected,
+            nfcEqual: refName.normalize('NFC') === expected.normalize('NFC'),
+            localeAccentEqual: refName.localeCompare(expected, undefined, {sensitivity: 'accent'}) === 0
+          }, null, 2)}\n`);
+          NODE
+
+      - name: Upload observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: environment-branch-policy-observations-${{ github.run_id }}-${{ github.run_attempt }}
+          path: observations/
+          if-no-files-found: error
