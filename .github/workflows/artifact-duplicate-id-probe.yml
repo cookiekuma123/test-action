@@ -1,0 +1,125 @@
+name: Artifact Duplicate ID Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare duplicate-name payloads
+        run: |
+          set -euo pipefail
+          mkdir -p payloads observations
+          printf 'source=first\nrun=%s\n' "$GITHUB_RUN_ID" > payloads/first.txt
+          printf 'source=second\nrun=%s\n' "$GITHUB_RUN_ID" > payloads/second.txt
+
+      - name: Upload first duplicate-name artifact with v3
+        id: upload_first_v3
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: duplicate-id-probe
+          path: payloads/first.txt
+
+      - name: Upload second duplicate-name artifact with v3
+        id: upload_second_v3
+        continue-on-error: true
+        uses: actions/upload-artifact@v3
+        with:
+          name: duplicate-id-probe
+          path: payloads/second.txt
+
+      - name: Upload first duplicate-name artifact with current action
+        id: upload_first_current
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: duplicate-id-probe-current
+          path: payloads/first.txt
+
+      - name: Upload second duplicate-name artifact with current action
+        id: upload_second_current
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: duplicate-id-probe-current
+          path: payloads/second.txt
+
+      - name: List candidate artifacts
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name | startswith("duplicate-id-probe")) | {id,name,size_in_bytes,created_at,expired,digest}' \
+            | tee observations/listed-artifacts.jsonl
+
+          first_id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name=="duplicate-id-probe") | .id] | min // ""')"
+          last_id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name=="duplicate-id-probe") | .id] | max // ""')"
+          count="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name=="duplicate-id-probe")] | length')"
+
+          {
+            echo "count=$count"
+            echo "first_id=$first_id"
+            echo "last_id=$last_id"
+          } | tee observations/duplicate-id-summary.txt
+
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "first_id=$first_id" >> "$GITHUB_OUTPUT"
+          echo "last_id=$last_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download first exact ID with v8
+        id: download_first
+        if: steps.list.outputs.first_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.list.outputs.first_id }}
+          path: downloaded-first
+
+      - name: Download last exact ID with v8
+        id: download_last
+        if: steps.list.outputs.last_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ steps.list.outputs.last_id }}
+          path: downloaded-last
+
+      - name: Record exact ID download results
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "upload_first_v3=${{ steps.upload_first_v3.outcome }}"
+            echo "upload_second_v3=${{ steps.upload_second_v3.outcome }}"
+            echo "upload_first_current=${{ steps.upload_first_current.outcome }}"
+            echo "upload_second_current=${{ steps.upload_second_current.outcome }}"
+            echo "download_first=${{ steps.download_first.outcome }}"
+            echo "download_last=${{ steps.download_last.outcome }}"
+            echo "first_id=${{ steps.list.outputs.first_id }}"
+            echo "last_id=${{ steps.list.outputs.last_id }}"
+            echo "count=${{ steps.list.outputs.count }}"
+            echo "--- downloaded-first"
+            find downloaded-first -type f -maxdepth 3 -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+            echo "--- downloaded-last"
+            find downloaded-last -type f -maxdepth 3 -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+          } | tee observations/exact-id-download-results.txt
+
+      - name: Upload probe observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: duplicate-id-probe-observations-${{ github.run_id }}
+          path: observations
