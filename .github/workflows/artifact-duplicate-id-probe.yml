@@ -11,47 +11,28 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare duplicate-name payloads
+      - name: Prepare rerun payload
         run: |
           set -euo pipefail
-          mkdir -p payloads observations
-          printf 'source=first\nrun=%s\n' "$GITHUB_RUN_ID" > payloads/first.txt
-          printf 'source=second\nrun=%s\n' "$GITHUB_RUN_ID" > payloads/second.txt
+          mkdir -p payload observations
+          {
+            echo "source=attempt-${GITHUB_RUN_ATTEMPT}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "sha=${GITHUB_SHA}"
+          } > payload/probe.txt
 
-      - name: Upload first duplicate-name artifact with v3
-        id: upload_first_v3
-        continue-on-error: true
-        uses: actions/upload-artifact@v3
-        with:
-          name: duplicate-id-probe
-          path: payloads/first.txt
-
-      - name: Upload second duplicate-name artifact with v3
-        id: upload_second_v3
-        continue-on-error: true
-        uses: actions/upload-artifact@v3
-        with:
-          name: duplicate-id-probe
-          path: payloads/second.txt
-
-      - name: Upload first duplicate-name artifact with current action
-        id: upload_first_current
+      - name: Upload fixed-name artifact
+        id: upload
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: duplicate-id-probe-current
-          path: payloads/first.txt
+          name: rerun-duplicate-id-probe
+          path: payload/probe.txt
 
-      - name: Upload second duplicate-name artifact with current action
-        id: upload_second_current
-        continue-on-error: true
-        uses: actions/upload-artifact@v7
-        with:
-          name: duplicate-id-probe-current
-          path: payloads/second.txt
-
-      - name: List candidate artifacts
+      - name: List matching artifacts
         id: list
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
@@ -59,67 +40,105 @@ jobs:
         run: |
           set -euo pipefail
           gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
-            --jq '.artifacts[] | select(.name | startswith("duplicate-id-probe")) | {id,name,size_in_bytes,created_at,expired,digest}' \
+            --jq '.artifacts[] | select(.name=="rerun-duplicate-id-probe") | {id,name,size_in_bytes,created_at,expired,digest}' \
             | tee observations/listed-artifacts.jsonl
 
           first_id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
-            --jq '[.artifacts[] | select(.name=="duplicate-id-probe") | .id] | min // ""')"
+            --jq '[.artifacts[] | select(.name=="rerun-duplicate-id-probe") | .id] | min // ""')"
           last_id="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
-            --jq '[.artifacts[] | select(.name=="duplicate-id-probe") | .id] | max // ""')"
+            --jq '[.artifacts[] | select(.name=="rerun-duplicate-id-probe") | .id] | max // ""')"
           count="$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
-            --jq '[.artifacts[] | select(.name=="duplicate-id-probe")] | length')"
+            --jq '[.artifacts[] | select(.name=="rerun-duplicate-id-probe")] | length')"
 
           {
             echo "count=$count"
             echo "first_id=$first_id"
             echo "last_id=$last_id"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
           } | tee observations/duplicate-id-summary.txt
 
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "first_id=$first_id" >> "$GITHUB_OUTPUT"
           echo "last_id=$last_id" >> "$GITHUB_OUTPUT"
 
-      - name: Download first exact ID with v8
-        id: download_first
+      - name: Download first exact ID with download-artifact
+        id: download_first_action
         if: steps.list.outputs.first_id != ''
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ steps.list.outputs.first_id }}
-          path: downloaded-first
+          path: downloaded-first-action
 
-      - name: Download last exact ID with v8
-        id: download_last
+      - name: Download last exact ID with download-artifact
+        id: download_last_action
         if: steps.list.outputs.last_id != ''
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ steps.list.outputs.last_id }}
-          path: downloaded-last
+          path: downloaded-last-action
+
+      - name: Install artifact toolkit for direct API probe
+        if: steps.list.outputs.first_id != ''
+        run: |
+          set -euo pipefail
+          npm init -y >/dev/null
+          npm install @actions/artifact@latest >/dev/null
+          cat > direct-download.mjs <<'JS'
+          import {DefaultArtifactClient} from '@actions/artifact'
+
+          const id = Number(process.env.ARTIFACT_ID)
+          const out = process.env.OUT_DIR
+          const artifact = new DefaultArtifactClient()
+          const response = await artifact.downloadArtifact(id, {path: out})
+          console.log(JSON.stringify({id, out, response}))
+          JS
+
+      - name: Download first exact ID with toolkit API
+        id: download_first_toolkit
+        if: steps.list.outputs.first_id != ''
+        continue-on-error: true
+        env:
+          ARTIFACT_ID: ${{ steps.list.outputs.first_id }}
+          OUT_DIR: downloaded-first-toolkit
+        run: node direct-download.mjs
+
+      - name: Download last exact ID with toolkit API
+        id: download_last_toolkit
+        if: steps.list.outputs.last_id != ''
+        continue-on-error: true
+        env:
+          ARTIFACT_ID: ${{ steps.list.outputs.last_id }}
+          OUT_DIR: downloaded-last-toolkit
+        run: node direct-download.mjs
 
       - name: Record exact ID download results
         if: always()
         run: |
           set -euo pipefail
           {
-            echo "upload_first_v3=${{ steps.upload_first_v3.outcome }}"
-            echo "upload_second_v3=${{ steps.upload_second_v3.outcome }}"
-            echo "upload_first_current=${{ steps.upload_first_current.outcome }}"
-            echo "upload_second_current=${{ steps.upload_second_current.outcome }}"
-            echo "download_first=${{ steps.download_first.outcome }}"
-            echo "download_last=${{ steps.download_last.outcome }}"
+            echo "upload=${{ steps.upload.outcome }}"
+            echo "download_first_action=${{ steps.download_first_action.outcome }}"
+            echo "download_last_action=${{ steps.download_last_action.outcome }}"
+            echo "download_first_toolkit=${{ steps.download_first_toolkit.outcome }}"
+            echo "download_last_toolkit=${{ steps.download_last_toolkit.outcome }}"
             echo "first_id=${{ steps.list.outputs.first_id }}"
             echo "last_id=${{ steps.list.outputs.last_id }}"
             echo "count=${{ steps.list.outputs.count }}"
-            echo "--- downloaded-first"
-            find downloaded-first -type f -maxdepth 3 -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
-            echo "--- downloaded-last"
-            find downloaded-last -type f -maxdepth 3 -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+            echo "--- downloaded-first-action"
+            find downloaded-first-action -maxdepth 3 -type f -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+            echo "--- downloaded-last-action"
+            find downloaded-last-action -maxdepth 3 -type f -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+            echo "--- downloaded-first-toolkit"
+            find downloaded-first-toolkit -maxdepth 3 -type f -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
+            echo "--- downloaded-last-toolkit"
+            find downloaded-last-toolkit -maxdepth 3 -type f -print -exec sh -c 'echo "FILE:$1"; sed -n "1,20p" "$1"' sh {} \; 2>/dev/null || true
           } | tee observations/exact-id-download-results.txt
 
       - name: Upload probe observations
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: duplicate-id-probe-observations-${{ github.run_id }}
+          name: duplicate-id-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}
           path: observations
